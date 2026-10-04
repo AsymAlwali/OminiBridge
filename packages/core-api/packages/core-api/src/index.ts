@@ -2,12 +2,12 @@ import { Hono } from 'hono'
 
 const app = new Hono()
 
-// Health check endpoint
 app.get('/health', (c) => c.json({ status: 'healthy', timestamp: new Date().toISOString() }))
 
-// 🤖 Universal Model Router (OpenAI, Anthropic, Gemini, Ollama)
+// 🤖 Real Upstream AI Provider Forwarder
 app.post('/v1/chat/completions', async (c) => {
   try {
+    const authHeader = c.req.header('Authorization')
     const body = await c.req.json()
     const { provider = 'openai', messages, agent_mode = false } = body
 
@@ -15,62 +15,76 @@ app.post('/v1/chat/completions', async (c) => {
       return c.json({ success: false, error: "Missing or invalid 'messages' array." }, 400)
     }
 
-    // Unified payload normalization layer
-    console.log(`[OmniBridge Router] Routing request to [${provider}] | Mode: [${agent_mode ? 'Agent' : 'Human'}]`)
+    // Example routing to real OpenAI endpoint if selected
+    if (provider === 'openai') {
+      const openAiKey = process.env.OPENAI_API_KEY
+      if (!openAiKey) {
+        return c.json({ success: false, error: "Server missing OPENAI_API_KEY environment variable." }, 500)
+      }
 
+      const upstreamRes = await fetch('https://openai.com', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openAiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages,
+          response_format: agent_mode ? { type: 'json_object' } : undefined
+        })
+      })
+
+      const data = await upstreamRes.json()
+      return c.json({ success: true, provider: 'openai', identity: agent_mode ? 'agent' : 'human', data })
+    }
+
+    // Fallback stub for other providers until custom keys are provided
     return c.json({
       success: true,
       provider,
       identity: agent_mode ? 'agent' : 'human',
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: `OmniBridge successfully intercepted and routed this request to the ${provider} engine. Context isolation maintained.`
-          },
-          finish_reason: 'stop'
-        }
-      ]
+      message: `Simulated response for ${provider}. Configure upstream environmental credentials to enable direct live proxying.`
     })
   } catch (err: any) {
     return c.json({ success: false, error: err.message }, 500)
   }
 })
 
-// 🔍 Universal Live Search Engine Plug (Google, Bing, Perplexity)
+// 🔍 Real Serper / Google Live Search Integration
 app.post('/v1/search', async (c) => {
   try {
     const body = await c.req.json()
-    const { query, engine = 'google', max_results = 5 } = body
+    const { query, max_results = 5 } = body
+    const searchKey = process.env.SERPER_API_KEY
 
     if (!query) {
       return c.json({ success: false, error: "Missing required parameter 'query'." }, 400)
     }
 
-    console.log(`[OmniBridge Search] Querying internet for: "${query}" via ${engine}`)
+    if (!searchKey) {
+      return c.json({
+        success: true,
+        engine: 'mock-search',
+        warning: 'SERPER_API_KEY not found in environment, returning stubbed results.',
+        results: [{ title: 'Stub Result', url: 'https://example.com', snippet: query }]
+      })
+    }
 
-    // Standardized data matrix returned seamlessly to either AI agents or humans
-    return c.json({
-      success: true,
-      engine,
-      meta: {
-        query,
-        returned_results: max_results,
-        timestamp: new Date().toISOString()
+    const searchRes = await fetch('https://serper.dev', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': searchKey,
+        'Content-Type': 'application/json'
       },
-      results: [
-        {
-          title: "OmniBridge Global Workspace Network",
-          url: "https://github.com",
-          snippet: `Live internet data match for "${query}". Context structural layer parsed successfully.`
-        }
-      ]
+      body: JSON.stringify({ q: query, num: max_results })
     })
+
+    const searchData = await searchRes.json()
+    return c.json({ success: true, engine: 'serper', data: searchData })
   } catch (err: any) {
     return c.json({ success: false, error: err.message }, 500)
   }
 })
 
 export default app
-  
