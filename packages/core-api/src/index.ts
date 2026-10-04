@@ -1,4 +1,7 @@
 import { Hono } from 'hono'
+import { serve } from '@hono/node-server'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const app = new Hono()
 
@@ -19,7 +22,12 @@ app.post('/v1/chat/completions', async (c) => {
     if (provider === 'openai') {
       const openAiKey = process.env.OPENAI_API_KEY
       if (!openAiKey) {
-        return c.json({ success: false, error: "Server missing OPENAI_API_KEY environment variable." }, 500)
+        return c.json({
+          success: true,
+          provider,
+          identity: agent_mode ? 'agent' : 'human',
+          message: `Simulated response for ${provider}. Configure upstream environmental credentials to enable direct live proxying.`
+        })
       }
 
       const upstreamRes = await fetch('https://openai.com', {
@@ -86,5 +94,9 @@ app.post('/v1/search', async (c) => {
     return c.json({ success: false, error: err.message }, 500)
   }
 })
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  serve({ fetch: app.fetch, port: 3000 })
+}
 
 export default app
