@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="github-oauth-client-id" content="">
+    <title>OmniBridge Dashboard</title>
+    <style>
+      :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f4f6fa; }
+      body { margin: 0; }
+      main { width: min(920px, calc(100% - 32px)); margin: 48px auto; }
+      header, section { padding: 24px; border: 1px solid #dce2ec; border-radius: 12px; background: #fff; }
+      section { margin-top: 20px; }
+      h1, h2, p { margin-top: 0; }
+      button, input { padding: 10px 12px; border: 1px solid #b8c2d3; border-radius: 6px; font: inherit; }
+      button { cursor: pointer; color: #fff; border-color: #2458c6; background: #2458c6; }
+      button.secondary { color: #172033; border-color: #b8c2d3; background: #fff; }
+      form { display: flex; flex-wrap: wrap; gap: 8px; }
+      input { min-width: min(280px, 100%); }
+      #key-list { padding: 0; list-style: none; }
+      #key-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #edf0f5; }
+      .muted { color: #647087; }
+      [role="status"] { min-height: 1.5em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="muted">OmniBridge administration</p>
+        <h1>Dashboard</h1>
+        <p>Sign-in is configured for GitHub OAuth only. Complete the deployment OAuth client and callback setup to enable authentication.</p>
+        <button id="github-sign-in" type="button">Continue with GitHub</button>
+        <p id="auth-status" role="status" class="muted"></p>
+      </header>
+
+      <section aria-labelledby="keys-heading">
+        <h2 id="keys-heading">Free-tier API keys</h2>
+        <p class="muted">In-memory UI prototype only: key values are masked and cleared when this page is reloaded. Connect a secure server-side key store before production use.</p>
+        <form id="key-form">
+          <label for="key-value">Add API key</label>
+          <input id="key-value" name="key" type="password" autocomplete="off" required>
+          <button type="submit">Add key</button>
+        </form>
+        <p id="key-status" role="status" class="muted"></p>
+        <ul id="key-list" aria-live="polite"></ul>
+        <button id="rotate-key" class="secondary" type="button">Rotate active key</button>
+        <p id="active-key" class="muted">No active key selected.</p>
+      </section>
+    </main>
+
+    <script type="module">
+      const clientId = document.querySelector('meta[name="github-oauth-client-id"]').content.trim()
+      const authStatus = document.querySelector('#auth-status')
+      document.querySelector('#github-sign-in').addEventListener('click', () => {
+        if (!clientId) {
+          authStatus.textContent = 'GitHub OAuth is the only supported sign-in method. Configure the deployment client ID and secure callback before enabling sign-in.'
+          return
+        }
+        const callback = `${window.location.origin}/oauth/github/callback`
+        const authorizationUrl = new URL('https://github.com/login/oauth/authorize')
+        authorizationUrl.searchParams.set('client_id', clientId)
+        authorizationUrl.searchParams.set('redirect_uri', callback)
+        authorizationUrl.searchParams.set('scope', 'read:user')
+        const state = crypto.randomUUID()
+        sessionStorage.setItem('github-oauth-state', state)
+        authorizationUrl.searchParams.set('state', state)
+        window.location.assign(authorizationUrl)
+      })
+
+      const keys = []
+      let activeKeyIndex = -1
+      const keyList = document.querySelector('#key-list')
+      const keyStatus = document.querySelector('#key-status')
+      const activeKey = document.querySelector('#active-key')
+
+      function renderKeys() {
+        keyList.replaceChildren()
+        keys.forEach((key, index) => {
+          const item = document.createElement('li')
+          const label = document.createElement('span')
+          label.textContent = `Key ${index + 1}: ••••${key.slice(-4)}${index === activeKeyIndex ? ' (active)' : ''}`
+          const remove = document.createElement('button')
+          remove.type = 'button'
+          remove.className = 'secondary'
+          remove.textContent = 'Remove'
+          remove.addEventListener('click', () => {
+            keys.splice(index, 1)
+            if (keys.length === 0) activeKeyIndex = -1
+            else if (index < activeKeyIndex) activeKeyIndex--
+            else if (activeKeyIndex >= keys.length) activeKeyIndex = 0
+            renderKeys()
+          })
+          item.append(label, remove)
+          keyList.append(item)
+        })
+        activeKey.textContent = activeKeyIndex < 0
+          ? 'No active key selected.'
+          : `Active key: ••••${keys[activeKeyIndex].slice(-4)}`
+      }
+
+      document.querySelector('#key-form').addEventListener('submit', (event) => {
+        event.preventDefault()
+        const input = document.querySelector('#key-value')
+        const value = input.value.trim()
+        if (!value) return
+        keys.push(value)
+        if (activeKeyIndex < 0) activeKeyIndex = 0
+        input.value = ''
+        keyStatus.textContent = 'Key added to this page session only.'
+        renderKeys()
+      })
+
+      document.querySelector('#rotate-key').addEventListener('click', () => {
+        if (keys.length === 0) {
+          keyStatus.textContent = 'Add a key before rotating.'
+          return
+        }
+        activeKeyIndex = (activeKeyIndex + 1) % keys.length
+        keyStatus.textContent = 'Active key rotated in this page session only.'
+        renderKeys()
+      })
+    </script>
+  </body>
+</html>

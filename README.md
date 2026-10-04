@@ -16,6 +16,12 @@ npm install
 npm run dev
 ```
 
+Set `OPENAI_API_KEYS` to a comma-separated list of upstream OpenAI API keys to enable round-robin routing and automatic fallback; `OPENAI_API_KEY` remains supported for a single key. `/v1/search` tries Serper when `SERPER_API_KEY` is configured, then falls back to DuckDuckGo HTML search if Serper fails or is unavailable. Successful results are cached in memory for ten minutes using a SHA-256 hash of the query and request options. To extract page text, pass up to five public HTTP(S) URLs in `scrape_urls`; the response includes clean Markdown under `scraped_content`.
+
+### Dashboard Stub
+
+`packages/dashboard` contains a static administrative UI stub. It is configured for GitHub OAuth only; a deployed OAuth client and callback/token-exchange service must be configured before sign-in can be enabled. The rotating-key controls are an in-memory UI prototype and do not persist credentials or connect to the API.
+
 ### SDK Usage Examples
 
 #### TypeScript (Humans)
