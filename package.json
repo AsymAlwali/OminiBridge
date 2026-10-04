@@ -1,0 +1,7 @@
+{
+  "name": "omnibridge-root",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}
