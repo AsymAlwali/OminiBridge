@@ -1,12 +1,12 @@
 import requests
-from typing import list, dict, optional
+from typing import Dict, List
 
 class OmniBridge:
     def __init__(self, api_key: str, base_url: str = "http://localhost:3000"):
         self.api_key = api_key
         self.base_url = base_url
 
-    def complete(self, provider: str, messages: list[dict], agent_mode: bool = False) -> dict:
+    def complete(self, provider: str, messages: List[Dict[str, str]], agent_mode: bool = False) -> dict:
         """Execute text completions or tool calls through the unified AI provider layer."""
         url = f"{self.base_url}/v1/chat/completions"
         headers = {

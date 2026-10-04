@@ -77,6 +77,8 @@ flowchart LR
 | [`packages/sdk-python`](./packages/sdk-python) | Agent-first Python client library | Python |
 | [`packages/dashboard`](./packages/dashboard) | Static admin UI stub (GitHub OAuth) | Vanilla/Static |
 
+See [USE_CASES.md](./USE_CASES.md) for practical scenarios, architectural comparisons, examples, and current limitations.
+
 ---
 
 ## 🚀 Quickstart
