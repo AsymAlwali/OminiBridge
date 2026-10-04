@@ -1,98 +1,87 @@
 # OminiBridge Use Cases
 
-OminiBridge is a small, self-hostable API gateway that gives an application one place to send chat-completion requests and web-search requests. Its most practical role today is as a thin integration layer for prototypes, internal tools, and agent experiments that need a simple API boundary without adopting a large orchestration framework.
+OminiBridge is a small, self-hostable API gateway that gives applications one place to send chat-completion and live web-search requests. Its strength is as a thin integration layer for prototypes, internal tools, and agent experiments that need a unified API boundary without adopting a large orchestration framework.
 
-This guide describes useful applications, compares common architectural choices, and calls out the current project's limits so the design can be evaluated realistically.
+This guide covers practical applications, architectural comparisons, and realistic current limitations so you can evaluate fit properly.
 
-## At a glance
+---
 
-| Need | How OminiBridge can help | Good fit when |
+## At a Glance
+
+| Need | How OminiBridge Helps | Best When |
 |---|---|---|
-| One application endpoint for AI calls | Clients call `/v1/chat/completions` rather than embedding an upstream URL in each feature | You own a small app and want one place to adjust provider configuration |
-| OpenAI key rotation | The API can try keys from `OPENAI_API_KEYS` in rotation and fall through to another key after a failed request | You have several authorized keys and understand the provider's account, billing, and terms |
-| Search-grounded answers | `/v1/search` returns web results and can fall back from configured Serper to DuckDuckGo HTML search | Your user task benefits from fresh public-web context |
-| Reduce repeated search traffic | Identical in-process search requests can reuse a cached result for ten minutes | Repeated queries are common and process-local freshness is acceptable |
-| Give an agent concise page context | Optional `scrape_urls` turns a small number of public pages into Markdown | You already have URLs and need useful text rather than full HTML |
-| Share a client interface across languages | TypeScript and Python SDKs wrap the HTTP endpoints | A small team has clients in both runtimes |
+| **One API endpoint** | Clients call `/v1/chat/completions` instead of wiring provider URLs everywhere | You want a single control point to adjust routing/config |
+| **OpenAI key rotation + failover** | Tries `OPENAI_API_KEYS` in round-robin, falling back to next keys on failure | You have multiple authorized keys and need basic resilience |
+| **Search-grounded answers** | `/v1/search` returns normalized results with Serper (primary) → DuckDuckGo HTML (fallback) | Fresh public web context improves answer quality |
+| **Reduce repeated search traffic** | SHA-256 hashed in-memory cache reuses identical queries for 10 minutes | Same queries repeat often in the same process |
+| **Concise page context for agents** | Optional `scrape_urls` extracts clean Markdown from up to 5 public pages | You need readable text, not raw HTML |
+| **Human + Agent parity** | Dual identity model (`human` vs `agent`) with `agent_mode` toggle | You need consistent APIs for both dev UIs and autonomous runtimes |
+| **Cross-language clients** | TypeScript and Python SDKs wrap the same HTTP surface | Teams work in mixed JS/Python environments |
 
-The project is a **gateway foundation**, not a complete AI platform. It does not currently provide durable conversations, a database, a job queue, a policy engine, an observability stack, a full provider catalog, or production dashboard authentication.
+> OminiBridge is a **gateway foundation**, not a full AI platform. It doesn't yet include durable conversations, a database, task queues, policy engines, full observability, multi-provider production adapters, or completed admin auth.
 
-## Practical use cases
+---
 
-### 1. Internal knowledge and research assistant
+## Practical Use Cases
 
-Build a small assistant that takes a question, searches the public web, and passes a few result snippets or extracted pages to a model for a cited summary.
+### 1. Internal Knowledge & Research Assistant
 
-**Example flow**
+Build a small assistant that searches the public web, optionally extracts key pages, and passes grounded context to an LLM.
 
-1. The client submits a search query to `/v1/search`.
-2. The gateway queries Serper when `SERPER_API_KEY` is configured, or uses the DuckDuckGo HTML fallback when it is not.
-3. The response includes normalized search results. If the caller provides `scrape_urls`, up to five public pages can also be returned as Markdown.
-4. The application decides which sources to send to a language model and how to cite them.
+**Flow:**
+1. Call `/v1/search` with query (+ optional `scrape_urls`)
+2. Gateway uses Serper if `SERPER_API_KEY` is set, else falls back to DuckDuckGo HTML
+3. Receive normalized `{ title, url, snippet }` results + optional `scraped_content` as Markdown
+4. Feed curated sources to the model with citations
 
-**Why this can be useful:** it gives the application one network boundary and a simple result shape while keeping retrieval separate from answer generation.
+**Tips:** Treat retrieved content as untrusted input. Always preserve source URLs and guard against prompt injection.
 
-**Important:** returned web content is untrusted input. Applications should preserve source URLs, verify facts, and defend downstream model prompts against prompt injection in retrieved pages.
+### 2. Developer Docs & Support Helper
 
-### 2. Developer-support or documentation helper
+Give engineers a lightweight tool to pull public release notes, API docs, or changelogs. Extract known doc pages to clean Markdown for summarization or Q&A.
 
-An internal developer tool can search release notes, public documentation, or issue discussions and show a compact digest. A small set of known documentation URLs can be extracted to Markdown for a language model or a human-facing summary.
+**Works best when:** content is public (no authenticated sessions). For private/internal docs, add an allowlisted authenticated retriever instead of scraping arbitrary gated URLs.
 
-This works best when:
+### 3. Lightweight AI Features in Existing Products
 
-- the content is public and does not require an authenticated browser session;
-- the caller controls the list of URLs to fetch;
-- results are treated as context, not as executable instructions; and
-- users can see links back to the source material.
+Route server-side completions through OminiBridge to centralize provider selection, key management, and request shaping. Keep provider credentials off the client and in one backend boundary.
 
-For private documentation, add an authenticated, allowlisted retrieval integration rather than exposing arbitrary authenticated URLs to the scraper.
+**Note:** Only **OpenAI chat completions** are live today. Other `provider` values return a simulated response (useful for prototyping) and should not be treated as live upstream calls.
 
-### 3. Lightweight AI features in an existing product
+### 4. Agent Prototypes & Automation
 
-An existing web application can call the gateway from its own server for tasks such as drafting, summarizing, or classifying short text. Keeping upstream calls behind one backend service centralizes endpoint selection and avoids copying provider credentials into every application component.
+The `agent_mode` flag signals agent-oriented usage. For OpenAI, it sets `response_format: { type: 'json_object' }` to encourage stricter, parseable JSON. The API also returns `identity: 'human' | 'agent'` so clients can branch logic.
 
-The current live completion implementation is specifically for OpenAI's chat-completions endpoint. Other provider names currently receive a simulated response; do not interpret those responses as real calls to Anthropic or another provider.
+**Scope:** Perfect for prototypes where the app owns tool execution, safety checks, approvals, and state. OminiBridge does **not** implement tool registries, function-calling loops, durable agent memory, or schedulers — keep those in your application.
 
-### 4. Agent prototypes and automation experiments
+### 5. Resilient Access Across Multiple OpenAI Keys
 
-The `agent_mode` request option is useful as a simple signal that the caller wants an agent-oriented response. In the OpenAI path, it asks for JSON-object response formatting. Python and TypeScript callers can use the same HTTP endpoint while experiments evolve.
+Set `OPENAI_API_KEYS` (comma-separated) or fallback to `OPENAI_API_KEY`. The gateway rotates starting keys per request and retries remaining configured keys on failure.
 
-This is appropriate for a prototype in which the application itself owns tool execution and safety checks. OminiBridge does **not** currently implement a tool registry, function-call execution loop, durable agent state, human approval flow, or task scheduler. Keep those responsibilities explicit in the application.
+**Use cases:** environment separation, basic high-availability against transient failures. This doesn't create extra quota, guarantee success, or bypass provider rate/account limits. Production use should add per-key health, cooldowns, retry policies, audit trails, and secret-manager integration.
 
-### 5. Resilient access across multiple authorized OpenAI keys
+### 6. Low-Volume Search Reuse
 
-Set `OPENAI_API_KEYS` to a comma-separated list of keys the service is authorized to use. The gateway rotates the starting key between requests and tries another configured key after a failed attempt.
+The process-local in-memory cache (10 min TTL, 500-entry cap, SHA-256 keyed by `[query, max_results, engine, scrape_urls]`) avoids duplicate upstream calls for identical requests.
 
-Potential uses include separating environments or teams by key and reducing interruption when one key is unavailable. This does not create extra provider capacity, combine independent quotas safely, or guarantee that a different key will succeed. Follow the provider's terms and billing rules; do not use key rotation to evade rate limits or account controls.
+**Great for:** repeated popular questions, UI refreshes, or dev/demo loops. Cache is **not** shared across replicas and resets on restart — treat TTL as a freshness/performance trade-off.
 
-For production, consider per-key health, cooldowns, retry limits, audit trails, and secret-manager integration. Keep keys on the server; never put provider credentials in the browser or dashboard.
+### 7. Thin Backend for Static UIs
 
-### 6. Low-volume search reuse
+The dashboard stub illustrates GitHub OAuth placeholder + in-memory key UI. It's a scaffold, **not** a production admin boundary yet:
 
-The `/v1/search` in-memory cache can eliminate repeated upstream search calls for an identical query and matching request options during its ten-minute TTL.
+- OAuth callback/state/token exchange not implemented
+- Key list is in-memory only (lost on reload)
+- Doesn't connect to or configure the API's secrets
+- Core API has no auth/authorization yet
 
-Good examples include:
+Don't expose it to control production credentials or as an access-control surface.
 
-- several users asking the same popular question shortly apart;
-- a UI that repeats a query during a refresh or navigation cycle; and
-- development or demonstration environments where fast repeat responses matter.
+---
 
-The cache is process-local and is cleared when the process restarts. Separate replicas do not share entries, and the first request still pays the provider latency. The TTL is a freshness/performance trade-off, not a guarantee that live results are current.
+## Example Request Patterns
 
-### 7. A thin backend for a static user interface
-
-The static dashboard stub shows where GitHub-only sign-in and key-list controls might live. It can be used as a starting point for a team console or prototype, but it is not a functioning secure admin product today:
-
-- GitHub OAuth callback handling, state verification, and server-side token exchange are not implemented.
-- The key list is in page memory and disappears on reload.
-- The UI does not configure or update the API's actual environment secrets.
-- The core API currently does not authenticate or authorize requests.
-
-Do not deploy the stub as an access-control boundary or enter real long-lived provider keys into it.
-
-## Example request patterns
-
-### Search from a server or command line
+### Basic Search
 
 ```bash
 curl http://localhost:3000/v1/search \
@@ -103,9 +92,9 @@ curl http://localhost:3000/v1/search \
   }'
 ```
 
-The response includes an `engine` label and a `results` array with `title`, `url`, and `snippet` fields. Search-provider selection and availability depend on server configuration and network access.
+Response includes `engine` (`serper` or `duckduckgo-html`), `results[]` `{title,url,snippet}`, and optional `fallback_reason` if Serper fell back.
 
-### Search and extract selected public pages
+### Search + Extract Public Pages
 
 ```bash
 curl http://localhost:3000/v1/search \
@@ -113,87 +102,126 @@ curl http://localhost:3000/v1/search \
   -d '{
     "query": "HTTP caching guidance",
     "max_results": 3,
-    "scrape_urls": ["https://example.org/guide"]
+    "scrape_urls": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching"]
   }'
 ```
 
-Successful extractions appear in `scraped_content` as Markdown. The endpoint limits result count, scrape URL count, page response size, and fetch time; private/local destinations are rejected. These checks reduce risk but are not a substitute for deployment-level egress controls.
+Extractions land in `scraped_content` as clean Markdown. Guards: max 5 URLs, 1MB/page cap, 8s timeout, redirects disabled, public-only (DNS+IP validated), `text/html|text/plain` only.
 
-### Use the Python SDK
+### Chat Completion (Human vs Agent)
+
+```bash
+# Human mode
+curl http://localhost:3000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "openai",
+    "messages": [{"role":"user","content":"Summarize this topic concisely."}],
+    "agent_mode": false
+  }'
+
+# Agent mode (requests JSON object)
+curl http://localhost:3000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "openai",
+    "messages": [{"role":"user","content":"Return structured plan as JSON."}],
+    "agent_mode": true
+  }'
+```
+
+### Python SDK
 
 ```python
 from omnibridge import OmniBridge
 
-bridge = OmniBridge(
-    api_key="application-token",
-    base_url="http://localhost:3000",
-)
+bridge = OmniBridge(api_key="app-token", base_url="http://localhost:3000")
 
-results = bridge.search(
-    query="Current guidance for Python packaging",
-    max_results=5,
+# Agent-first structured call
+res = bridge.complete(
+    provider="openai",
+    messages=[{"role":"user","content":"Return findings in JSON schema form."}],
+    agent_mode=True
 )
-
-if results.get("success"):
-    for item in results.get("results", []):
-        print(item["title"], item["url"])
+print(res.get("identity"))  # 'agent' or 'human'
 ```
 
-The SDK's `api_key` is currently sent as a bearer token, but the API does not yet verify it. Treat this as a client placeholder, not authentication.
+### TypeScript SDK
 
-## Comparisons with common approaches
+```ts
+import { OmniBridge } from '@omnibridge/sdk';
 
-These are architectural comparisons, not benchmark claims or assertions about specific vendors' latest features.
+const omni = new OmniBridge({ apiKey: 'app-token', baseUrl: 'http://localhost:3000' });
 
-| Approach | Setup and control | Portability | Search and extraction | Operational burden | Choose it when |
+const search = await omni.search({ query: 'RAG best practices 2026', maxResults: 3 });
+console.log(search.results);
+```
+
+---
+
+## Architecture Comparison
+
+| Approach | Setup | Portability | Search/Extract | Ops Burden | Best For |
 |---|---|---|---|---|---|
-| Call a model provider directly | Lowest setup; each app integrates the provider itself | Low unless the app adds its own adapter layer | Usually a separate integration | Duplicated provider setup across clients; little extra infrastructure | One app uses one provider and a gateway adds no value |
-| Use a provider's official SDK | Convenient provider-specific features and typed APIs | Low across providers | Usually separate from model calls | Provider-specific code remains in the application | You want the fullest support for one provider's current API |
-| Use a larger agent/orchestration framework | More concepts and configuration; richer workflow abstractions | Depends on framework adapters | Often available through integrations or extensions | More dependencies and design surface | You need tool graphs, multi-step orchestration, memory, or workflow controls |
-| Build an in-house proxy | Full control over contracts, auth, policy, and routing | Whatever you implement | Whatever you implement | Highest initial engineering and maintenance cost | Requirements demand custom governance, scale, or integrations |
-| Use a hosted AI gateway | Little infrastructure to operate; features depend on service | Often designed for multiple providers | Varies by product and plan | Less infrastructure work, but introduces vendor, pricing, and data-processing considerations | Managed operations and support matter more than self-hosting |
-| Use OminiBridge | Small self-hosted Hono service with a simple API and SDKs | A useful boundary, but only OpenAI is live for completions today | Basic web search fallback, short-lived process cache, optional Markdown extraction | You operate the API, keys, network, and production controls | You want a small modifiable gateway for an early-stage app or internal prototype |
+| Direct provider SDK | Low | Low | Separate | Duplicated per app | Single app, single provider |
+| Provider SDKs only | Easy | Provider-locked | Separate | Repeated config | Max provider-native features |
+| Full agent/orchestration (LangGraph, etc.) | Medium-High | Framework-bound | Via tools/integrations | Higher surface | Multi-step workflows, tools, memory |
+| Build custom proxy | High | Your design | Your impl | Highest | Strict governance/custom needs |
+| Hosted AI gateway | Low | Varies | Varies by plan | Less infra, vendor lock-in | Want managed ops |
+| **OminiBridge** | Low | Unified boundary | Serper+DDG, SSRF-safe scrape, cache | You run it | Small internal/prototype, want modifiable thin gateway |
 
-### A quick decision guide
+### Quick Decision Guide
 
-- **One provider, one app, little repetition:** call the provider directly or use its official SDK.
-- **Need a small shared HTTP boundary and simple search behavior:** OminiBridge may be a good starting point.
-- **Need durable shared caching, strict authentication, audit logs, quotas, or multi-replica operation:** add those capabilities deliberately or select a more complete gateway.
-- **Need complex multi-step agents and tool orchestration:** use a workflow/agent framework or implement an explicit orchestration service.
-- **Need a non-OpenAI provider in production:** implement and test a real adapter before routing user traffic to that provider.
+- **One provider, one simple app:** Call provider directly.
+- **Need shared HTTP boundary + basic search + human/agent split:** **OminiBridge fits well**.
+- **Need durable shared cache, quotas, authZ/authN, audit, multi-replica:** Extend OminiBridge or use a fuller gateway.
+- **Need complex agent orchestration/tools:** Use an agent framework.
+- **Need non-OpenAI live in prod:** Implement/test real adapters first.
 
-## Current capabilities and boundaries
+---
 
-| Area | Current behavior | Do not assume |
+## Capabilities vs. Boundaries
+
+| Area | Current Behavior | Don't Assume |
 |---|---|---|
-| Chat completions | Calls OpenAI chat completions when OpenAI keys are configured; otherwise returns a simulation. | That an unconfigured request calls a model, or that every named provider is integrated. |
-| Provider key rotation | Reads `OPENAI_API_KEYS` or the single-key `OPENAI_API_KEY`, rotates the starting key, and retries other keys on failures. | That rotation guarantees quota, applies cooldowns, or distinguishes retryable from permanent failures. |
-| Search | Attempts Serper if configured, then DuckDuckGo HTML fallback. | That the `engine` parameter currently chooses Bing or Perplexity; it is accepted but does not select those providers. |
-| Search cache | In-memory, ten-minute TTL, bounded to 500 entries, keyed by query and request options. | That the cache is durable, shared among replicas, or survives restart. |
-| Page extraction | Optional extraction for up to five public HTTP(S) URLs, returning text-oriented Markdown. | That it is a full browser, JavaScript renderer, or complete article-readability engine. |
-| Dashboard | Static UI prototype with GitHub OAuth redirect placeholder and in-memory key controls. | That OAuth is complete or the keys are stored securely or connected to the API. |
-| Request security | Fetch limits and URL checks exist for page extraction. | That the API has authentication, authorization, tenant isolation, or production-grade egress policy. |
+| **Chat Completions** | OpenAI live (gpt-4o-mini) with round-robin/failover; others simulated when no real adapter | All providers are live or simulations equal production behavior |
+| **Key Rotation** | Rotates starting key, retries others on failure | Cooldowns, quota awareness, or classifying retryable vs permanent errors |
+| **Search Providers** | Serper primary → DuckDuckGo HTML fallback | `engine` ('google'/'bing'/'perplexity') selects those upstreams today (currently routes via Serper/DDG selection) |
+| **Caching** | In-memory, 10m TTL, 500 cap, SHA-256 keyed by query+options | Shared across replicas, durable, or survives restarts |
+| **Scraping** | Up to 5 public HTTP(S), 1MB, 8s, redirects disabled, DNS+IP public checks, text/* only | Full JS rendering, full article extraction, or authenticated pages |
+| **Identity Model** | Returns `identity: 'human' \| 'agent'`; `agent_mode` enforces JSON object for OpenAI | Other providers honor the same JSON constraint yet |
+| **Dashboard** | Static GitHub OAuth stub + in-memory UI | OAuth complete, secrets stored, or UI connected to API |
+| **Security** | SSRF guards on scrape + fetch limits | API has request authN/authZ, rate limits, tenant isolation, or full egress policy yet |
 
-## My take
+---
 
-The strongest near-term use case is a **self-hosted internal assistant backend** for a small team: use the gateway to centralize an OpenAI integration, add basic public-web search, and let Python or TypeScript clients share that boundary. The lightweight footprint makes it understandable and easy to modify, and the separation between clients and upstream integrations is a useful foundation.
+## Recommendations Before Production
 
-The main risk is the gap between the project's ambitious “unified/production” positioning and its present implementation. Before exposing it to public or sensitive traffic, I would prioritize:
+1. **AuthN/AuthZ** — Add request-level auth (API keys/JWT), per-tenant scoping, rate limits, and max request sizes
+2. **Real Provider Adapters** — Implement and test non-OpenAI providers with clear error semantics
+3. **Secret Management** — Load keys from a secrets manager; rotate/safe lifecycle, never log secrets
+4. **Observability** — Add structured logs, metrics, traces, and health/readiness endpoints
+5. **Hardened Egress** — Layer network-level egress allowlists on top of app-level SSRF checks
+6. **Complete Dashboard Auth** — Implement OAuth callback, state validation, CSRF, server-side token exchange before treating as admin
+7. **Resilient Search** — Add timeouts/retries per provider, circuit breakers, and better parsing
+8. **Cache Semantics** — Define cross-replica strategy if scaling horizontally
 
-1. real authentication and authorization, with rate limits and request-size limits;
-2. real provider adapters with clear failure semantics and tests;
-3. secret-manager-backed credentials and safe key lifecycle controls;
-4. deployment-aware cache semantics and metrics;
-5. stronger SSRF defenses at both application and network-egress layers;
-6. OAuth callback/token handling before treating the dashboard as an admin interface; and
-7. integration tests that assert provider behavior, cache hits, expiration, and failure responses without relying on external services.
+---
 
-Until then, use it as a **local, internal, or controlled prototype**, keep it behind a trusted network boundary, and never rely on its placeholder dashboard or bearer-token field as access control.
+## Related Documentation
 
-## Related project documentation
+- [README.md](./README.md) — Quickstart, features, examples
+- [CONTEXT.md](./CONTEXT.md) — Complete architecture, internals, API details, AI agent context
+- [Core API](./packages/core-api) — Hono server implementation
+- [TypeScript SDK](./packages/sdk-ts) — Universal TS/JS client
+- [Python SDK](./packages/sdk-python) — Agent-first Python client
+- [Dashboard](./packages/dashboard) — Static OAuth stub
+- [Integration Tests](./test-pipeline.ts) — Smoke validation matrix
 
-- [README](./README.md)
-- [Core API](./packages/core-api)
-- [TypeScript SDK](./packages/sdk-ts)
-- [Python SDK](./packages/sdk-python)
-- [Dashboard stub](./packages/dashboard)
+---
+
+<div align="center">
+
+**⚡ Bridging Intent • Grounding Context • Powering Agents ⚡**
+
+</div>
