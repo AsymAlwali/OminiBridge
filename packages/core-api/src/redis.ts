@@ -21,16 +21,18 @@ let connecting: Promise<RedisClient> | undefined
 export async function getRedisClient() {
   const url = process.env.REDIS_URL
   if (!url) throw new Error('REDIS_URL is required for shared rate limiting.')
-  client ??= createClient({
-    url,
-    socket: {
-      connectTimeout: 1_000,
-      reconnectStrategy: (retries) => retries < 2 ? 100 * (retries + 1) : false
-    }
-  })
-  client.on('error', () => {
-    console.error('Redis connection error while enforcing tenant rate limits.')
-  })
+  if (!client) {
+    client = createClient({
+      url,
+      socket: {
+        connectTimeout: 1_000,
+        reconnectStrategy: (retries) => retries < 2 ? 100 * (retries + 1) : false
+      }
+    })
+    client.on('error', () => {
+      console.error('Redis connection error while enforcing tenant rate limits.')
+    })
+  }
   if (!client.isOpen) {
     connecting ??= client.connect().then(() => client!).finally(() => {
       connecting = undefined

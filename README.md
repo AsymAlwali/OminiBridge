@@ -117,6 +117,10 @@ Configure credentials for live functionality:
 | `METRICS_TOKEN` | Optional | Enables the authenticated Prometheus `/metrics` endpoint; keep it private |
 | `SEARCH_CACHE_BACKEND` | Optional | `redis` for authenticated deployments; `memory` for local development |
 | `SEARCH_CACHE_FAILURE_MODE` | Optional | `bypass` (default) lets search continue during cache errors; `fail` returns `503` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional | Enables OpenTelemetry trace export to an OTLP/HTTP collector; defaults to `<endpoint>/v1/traces` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional | Trace-specific OTLP/HTTP endpoint; takes precedence over the general endpoint |
+| `OTEL_SERVICE_NAME` | Optional | OpenTelemetry service name (default `omnibridge-core-api`) |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Optional | Standard OpenTelemetry SDK sampling configuration |
 
 > **Local development:** Set `AUTH_MODE=development` to run without a database or tenant key. Chat can still run in simulated mode when no upstream keys are configured.
 
@@ -159,6 +163,30 @@ budget is unlimited. Set `--requests unlimited` to remove a tenant's budget.
 Prompts, authorization headers, and API keys are not included in usage records.
 Redis or usage-store failure rejects protected calls rather than silently
 bypassing controls.
+
+### Distributed tracing
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to
+enable batched OpenTelemetry traces over OTLP/HTTP. With neither endpoint set,
+tracing is disabled and the API initializes no tracing middleware, span
+processor, or exporter. Incoming W3C `traceparent` context is continued, and
+outbound provider/search requests carry the child context. Responses include
+`X-Trace-ID` when tracing is active.
+
+Spans contain only bounded route/operation names, HTTP methods, and response
+statuses. Request or response bodies, URLs and query strings, authorization
+headers, provider credentials, and exception messages are deliberately omitted.
+For example, use a collector endpoint and a sampled configuration appropriate
+for your traffic. The collector hostname must be reachable from the API
+container:
+
+```bash
+OTEL_SERVICE_NAME=omnibridge-core-api \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://your-collector:4318 \
+OTEL_TRACES_SAMPLER=parentbased_traceidratio \
+OTEL_TRACES_SAMPLER_ARG=0.1 \
+docker compose up --build
+```
 
 Set `METRICS_TOKEN` to expose Prometheus request counters and latency
 histograms at `/metrics`; scrape it with `Authorization: Bearer
