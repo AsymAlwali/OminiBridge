@@ -90,10 +90,14 @@ Spin up the unified proxy in seconds:
 ```bash
 cd packages/core-api
 npm install
-npm run dev
+AUTH_MODE=development npm run dev
 ```
 
 🎉 Server now running at `http://localhost:3000`!
+
+`AUTH_MODE=development` is an explicit local-only auth bypass. The default
+`AUTH_MODE=required` protects `/v1/*` and requires a configured PostgreSQL key
+store; never run the development bypass on a reachable deployment.
 
 ### 2. Environment Configuration
 
@@ -105,8 +109,105 @@ Configure credentials for live functionality:
 | `OPENAI_API_KEY` | Optional | Single OpenAI key fallback |
 | `SERPER_API_KEY` | Optional | Enables Serper primary search. Falls back to DuckDuckGo HTML if missing/failed |
 | `PORT` | Optional | Custom port (defaults to `3000`) |
+| `AUTH_MODE` | Optional | `required` (default) enforces tenant API keys; `development` explicitly bypasses auth for local-only use |
+| `DATABASE_URL` | Required for authenticated API use | PostgreSQL connection string for tenant and API-key metadata |
+| `REDIS_URL` | Required for authenticated API use | Redis connection string for atomic shared tenant rate limits |
+| `RATE_LIMIT_MAX_REQUESTS` | Optional | Requests per tenant per window (default `60`) |
+| `RATE_LIMIT_WINDOW_MS` | Optional | Fixed-window duration in milliseconds (default `60000`) |
+| `METRICS_TOKEN` | Optional | Enables the authenticated Prometheus `/metrics` endpoint; keep it private |
+| `SEARCH_CACHE_BACKEND` | Optional | `redis` for authenticated deployments; `memory` for local development |
+| `SEARCH_CACHE_FAILURE_MODE` | Optional | `bypass` (default) lets search continue during cache errors; `fail` returns `503` |
 
-> **Pro Tip:** With no keys configured, OminiBridge runs in **simulated mode** perfect for local development and testing!
+> **Local development:** Set `AUTH_MODE=development` to run without a database or tenant key. Chat can still run in simulated mode when no upstream keys are configured.
+
+### Authenticated API setup
+
+For production-like use, apply the schema migration and create a tenant key
+using the operator-only CLI. The database connection must be restricted to
+trusted operators; the key is printed once and never stored in plaintext.
+
+```bash
+export DATABASE_URL='postgresql://...'
+export REDIS_URL='redis://...'
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f packages/core-api/migrations/001_tenant_api_keys.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f packages/core-api/migrations/002_shared_limits_and_usage.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f packages/core-api/migrations/003_monthly_request_budgets.sql
+npm run keys --workspace @omnibridge/core-api -- create \
+  --tenant example --name app --scopes chat:complete,search:read
+```
+
+Copy the generated key into the client configuration. To review metadata or
+revoke a key, run:
+
+```bash
+npm run keys --workspace @omnibridge/core-api -- list --tenant example
+npm run keys --workspace @omnibridge/core-api -- revoke --prefix omni_live_XXXXXXXXXXXX
+npm run keys --workspace @omnibridge/core-api -- set-budget \
+  --tenant example --requests 10000
+```
+
+Plaintext keys cannot be retrieved after creation; create a replacement key to
+rotate. Authenticated requests share a Redis fixed-window limit per tenant and
+are recorded in PostgreSQL with request ID, operation, response status, and
+duration. The optional per-tenant monthly budget counts successful (2xx)
+operations in UTC calendar months; validation errors, rate-limit rejections,
+and upstream failures do not consume a successful-request slot. The default
+budget is unlimited. Set `--requests unlimited` to remove a tenant's budget.
+Prompts, authorization headers, and API keys are not included in usage records.
+Redis or usage-store failure rejects protected calls rather than silently
+bypassing controls.
+
+Set `METRICS_TOKEN` to expose Prometheus request counters and latency
+histograms at `/metrics`; scrape it with `Authorization: Bearer
+<METRICS_TOKEN>`. The endpoint is disabled (404) when no token is configured
+and never includes tenant IDs, prompts, search queries, or credentials.
+
+### Run the production-style stack locally
+
+Docker Compose starts PostgreSQL, Redis, and the API; the API applies pending
+database migrations before accepting traffic. Nginx exposes the API through a
+local-only reverse proxy.
+
+```bash
+POSTGRES_PASSWORD='replace-with-a-local-secret' docker compose up --build -d
+curl --fail http://localhost:3000/ready
+docker compose exec api node packages/core-api/dist/api-keys.js create \
+  --tenant example --name app --scopes chat:complete,search:read
+```
+
+Scale the API behind the proxy with `docker compose up --scale api=2 -d`.
+Redis-backed limits and search cache, along with PostgreSQL keys and usage,
+remain shared across the replicas. For operator commands with multiple API
+containers, select one explicitly, for example:
+`docker compose exec --index 1 api node packages/core-api/dist/api-keys.js list --tenant example`.
+
+The Compose ports bind to localhost. Its default PostgreSQL password is only
+for disposable local development—set `POSTGRES_PASSWORD` explicitly and use
+managed credentials, TLS, backups, and network policy for deployed
+environments. Stop the stack with `docker compose down`; the PostgreSQL volume
+is retained unless explicitly removed.
+
+Back up the durable control and usage data with:
+
+```bash
+docker compose exec -T postgres pg_dump -U omnibridge omnibridge > omnibridge.sql
+```
+
+Restore a dump to a clean database before pointing the service at it:
+
+```bash
+docker compose exec -T postgres createdb -U omnibridge omnibridge_restore
+cat omnibridge.sql | docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 --single-transaction -U omnibridge -d omnibridge_restore
+```
+
+Backups contain API-key hashes and usage data: encrypt them, store them outside
+the container host with access controls, and test restores regularly. Redis
+contains only rebuildable rate-limit and cache state; it is not a substitute
+for PostgreSQL backups.
 
 ### 3. SDK Usage Examples
 
@@ -115,8 +216,8 @@ Configure credentials for live functionality:
 ```typescript
 import { OmniBridge } from '@omnibridge/sdk';
 
-const omni = new OmniBridge({ 
-  apiKey: 'OMNI_KEY_SECRET',
+const omni = new OmniBridge({
+  apiKey: process.env.OMNIBRIDGE_API_KEY!,
   baseUrl: 'http://localhost:3000'
 });
 
@@ -133,9 +234,10 @@ console.log(response);
 #### Python (For AI Agents & Automated Runtimes)
 
 ```python
+import os
 from omnibridge import OmniBridge
 
-omni = OmniBridge(api_key="OMNI_KEY_SECRET", base_url="http://localhost:3000")
+omni = OmniBridge(api_key=os.environ["OMNIBRIDGE_API_KEY"], base_url="http://localhost:3000")
 
 # Elevate to agent_mode=True for structured JSON alignment
 response = omni.complete(
@@ -258,16 +360,18 @@ npx tsx test-pipeline.ts
 
 ## 🗺️ Roadmap
 
+- [ ] Production Gateway Foundation: tenant-aware auth, shared quotas and cache,
+  durable usage, and a PostgreSQL + Redis deployment
 - [ ] Multi-provider expansion with per-provider key configuration
 - [ ] Persistent dashboard backend (auth + key management)
-- [ ] Rate limiting + proxy-level API key authentication
 - [ ] Response caching by request hash
 - [ ] Streaming passthrough (`stream: true`)
 - [ ] Structured search parsing & fully typed results
 - [ ] Zod request validation
 - [ ] Observability (logs, metrics, tracing)
-- [ ] Docker + Docker Compose support
-- [ ] Typed error contracts across all SDKs
+
+See the [Production Gateway Foundation proposal](./PROPOSALS/production-gateway-foundation.md)
+for the rationale, security requirements, and phased delivery plan.
 
 ---
 

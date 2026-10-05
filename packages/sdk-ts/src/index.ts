@@ -15,6 +15,34 @@ export interface SearchOptions {
   maxResults?: number;
 }
 
+export class OmniBridgeError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly responseBody: unknown
+  ) {
+    super(message);
+    this.name = 'OmniBridgeError';
+  }
+}
+
+async function readResponse(response: Response) {
+  const text = await response.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = text;
+  }
+
+  if (!response.ok) {
+    const errorMessage = body && typeof body === 'object' && 'error' in body &&
+      typeof body.error === 'string' ? body.error : `Request failed with status ${response.status}.`;
+    throw new OmniBridgeError(errorMessage, response.status, body);
+  }
+  return body;
+}
+
 export class OmniBridge {
   private apiKey: string;
   private baseUrl: string;
@@ -38,7 +66,7 @@ export class OmniBridge {
         agent_mode: options.agentMode ?? false
       })
     });
-    return response.json();
+    return readResponse(response);
   }
 
   // Universal Live Internet Data query binding
@@ -55,6 +83,6 @@ export class OmniBridge {
         max_results: options.maxResults ?? 5
       })
     });
-    return response.json();
+    return readResponse(response);
   }
 }

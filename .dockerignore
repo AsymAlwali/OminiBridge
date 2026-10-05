@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/__pycache__
+**/*.egg-info
+.env
+.env.*
+*.log

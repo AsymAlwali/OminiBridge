@@ -9,6 +9,31 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: omnibridge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d omnibridge_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/omnibridge_test
+      REDIS_URL: redis://localhost:6379
     steps:
       - name: Checkout Code Repository
         uses: actions/checkout@v4
@@ -20,11 +45,90 @@ jobs:
           cache: 'npm'
 
       - name: Install Node Dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build Core Gateway and TypeScript SDK
         run: |
           npm run build --workspaces --if-present
+          npm test --workspace @omnibridge/core-api
+          npm test --workspace @omnibridge/sdk
+
+      - name: Build production container
+        run: docker build --tag omnibridge:ci .
+
+      - name: Smoke-test production Compose stack
+        env:
+          POSTGRES_PASSWORD: ci-only-local-password
+          POSTGRES_PORT: 55433
+          REDIS_PORT: 56380
+          PORT: 33000
+          RATE_LIMIT_MAX_REQUESTS: 1
+          METRICS_TOKEN: ci-local-metrics-token
+        run: |
+          set -eu
+          docker compose -p omnibridge-ci up --build -d
+          cleanup() {
+            docker compose -p omnibridge-ci down --volumes
+            rm -f /tmp/omnibridge-ci-backup.sql
+          }
+          trap cleanup EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:33000/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          key_output="$(docker compose -p omnibridge-ci exec -T api \
+            node packages/core-api/dist/api-keys.js create \
+            --tenant ci --name smoke --scopes chat:complete)"
+          api_key="$(printf '%s\n' "$key_output" | grep '^omni_live_' | tail -n 1)"
+          test -n "$api_key"
+          docker compose -p omnibridge-ci exec -T api \
+            node packages/core-api/dist/api-keys.js set-budget \
+            --tenant ci --requests 10
+          unauth_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data '{"messages":[{"role":"user","content":"hello"}]}' \
+            http://127.0.0.1:33000/v1/chat/completions)"
+          test "$unauth_status" = 401
+          curl --fail --silent \
+            -H "Authorization: Bearer $api_key" \
+            -H 'Content-Type: application/json' \
+            --data '{"messages":[{"role":"user","content":"hello"}]}' \
+            http://127.0.0.1:33000/v1/chat/completions >/dev/null
+          limited_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -H "Authorization: Bearer $api_key" \
+            -H 'Content-Type: application/json' \
+            --data '{"messages":[{"role":"user","content":"hello"}]}' \
+            http://127.0.0.1:33000/v1/chat/completions)"
+          test "$limited_status" = 429
+          metrics_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:33000/metrics)"
+          test "$metrics_status" = 401
+          curl --fail --silent \
+            -H "Authorization: Bearer $METRICS_TOKEN" \
+            http://127.0.0.1:33000/metrics | grep -q omnibridge_http_requests_total
+          docker compose -p omnibridge-ci up --scale api=2 -d
+          first_status="$(docker compose -p omnibridge-ci exec -T --index 1 \
+            -e API_KEY="$api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
+          second_status="$(docker compose -p omnibridge-ci exec -T --index 2 \
+            -e API_KEY="$api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
+          test "$first_status" = 200
+          test "$second_status" = 429
+          docker compose -p omnibridge-ci exec -T postgres \
+            pg_dump -U omnibridge omnibridge > /tmp/omnibridge-ci-backup.sql
+          docker compose -p omnibridge-ci exec -T postgres \
+            createdb -U omnibridge omnibridge_restore
+          docker compose -p omnibridge-ci exec -T postgres sh -c \
+            'psql -v ON_ERROR_STOP=1 --single-transaction -U omnibridge -d omnibridge_restore' \
+            < /tmp/omnibridge-ci-backup.sql
+          restored_tenant_count="$(docker compose -p omnibridge-ci exec -T postgres \
+            psql -U omnibridge -d omnibridge_restore -Atc \
+            "SELECT count(*) FROM tenants WHERE name='ci'")"
+          test "$restored_tenant_count" = 1
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5
@@ -36,4 +140,5 @@ jobs:
           cd packages/sdk-python
           python -m pip install --upgrade pip
           pip install .
+          python -m unittest discover -s tests
           

@@ -5,7 +5,8 @@
   "types": "./dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx --test src/index.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

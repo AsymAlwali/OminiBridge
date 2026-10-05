@@ -78,7 +78,7 @@ It also ships with a pragmatic **live search + scraping** stack: Serper (primary
 ├── package.json        # npm workspaces (packages/*)
 ├── package-lock.json
 ├── packages
-│   ├── core-api        # Hono proxy server
+│   ├── core-api        # Hono proxy server, PostgreSQL tenant API-key auth
 │   ├── dashboard       # Static admin UI stub (GitHub OAuth only)
 │   ├── sdk-python      # Agent-first Python client
 │   └── sdk-ts          # Universal TS/JS client
@@ -213,6 +213,36 @@ Unified live search + optional page scraping.
 
 ### Security & Guardrails (SSRF Hardening)
 
+- `/health` is public; `/v1/*` requires tenant API keys by default.
+- API keys are 256-bit random secrets; PostgreSQL stores SHA-256 hashes and a
+  12-character secret prefix for lookup. Keys can be scoped to
+  `chat:complete` and `search:read`, and revocation is checked on each request.
+- Missing/invalid keys receive `401`, insufficient scopes `403`, and auth
+  storage failures `503`. Only explicit `AUTH_MODE=development` bypasses auth.
+- Operator key commands: `npm run keys --workspace @omnibridge/core-api --`
+  followed by `create`, `list`, or `revoke`. Plaintext appears only at creation.
+- Authenticated production requests require `REDIS_URL` and
+  `DATABASE_URL`. Redis applies an atomic per-tenant fixed-window limit
+  (`RATE_LIMIT_MAX_REQUESTS`, default 60 per
+  `RATE_LIMIT_WINDOW_MS`, default 60000); Redis failures reject with `503`.
+- PostgreSQL stores request IDs, tenant IDs, operation, status, and duration in
+  `request_usage`; prompt content and credentials are never written there.
+  Usage-write failure returns `503` because the outcome may already have run
+  upstream.
+- Production search cache uses Redis with a 10-minute TTL; development defaults
+  to a bounded in-memory LRU. `SEARCH_CACHE_BACKEND` can explicitly select an
+  adapter, and `SEARCH_CACHE_FAILURE_MODE=bypass|fail` controls cache outages
+  (default `bypass`, since cache is an optimization).
+- Prometheus counters and latency histograms are exposed only when
+  `METRICS_TOKEN` is configured and a matching bearer token is supplied to
+  `/metrics`; metric labels never include tenant, query, prompt, or credential
+  values.
+- `npm run migrate --workspace @omnibridge/core-api` applies ordered SQL
+  migrations once under a PostgreSQL advisory lock. Compose runs migrations
+  before startup; `/health` is liveness and `/ready` checks database and Redis.
+- Compose puts API containers behind an Nginx proxy; scale with
+  `docker compose up --scale api=2 -d`. API keys, quotas, usage, and search
+  cache use shared PostgreSQL/Redis state.
 - **Protocol allowlist**: Only `http:`/`https:`, no credentials in URL.
 - **Hostname blocking**: `localhost`, `.localhost`, `.local`, `.internal` rejected.
 - **IP filtering**: Blocks private/loopback/link-local/multicast/CGNAT ranges (IPv4 & IPv6).
@@ -252,6 +282,7 @@ export class OmniBridge {
 - Default `baseUrl`: `http://localhost:3000`
 - Auth: `Bearer <apiKey>`
 - Maps `agentMode` → `agent_mode`, `maxResults` → `max_results`
+- Non-2xx responses throw `OmniBridgeError` with `status` and `responseBody`.
 
 ---
 
@@ -264,6 +295,8 @@ class OmniBridge:
 ```
 
 Agent-first design, uses `requests>=2.28.0`. Mirrors TS surface exactly.
+Non-2xx responses raise `OmniBridgeError` with `status_code` and
+`response_body`.
 
 ---
 
@@ -284,6 +317,14 @@ Agent-first design, uses `requests>=2.28.0`. Mirrors TS surface exactly.
 | `OPENAI_API_KEYS` | optional | Comma-separated for round-robin + failover (takes precedence) |
 | `SERPER_API_KEY` | optional | Enables Serper primary search; falls back to DDG HTML if missing/failed |
 | `PORT` | optional | Core API port (default 3000) |
+| `AUTH_MODE` | optional | `required` (default); `development` explicitly bypasses authentication for local-only use |
+| `DATABASE_URL` | required for authenticated API use | PostgreSQL connection string for tenants and API keys |
+| `REDIS_URL` | required for authenticated API use | Redis connection string for shared atomic rate limits |
+| `RATE_LIMIT_MAX_REQUESTS` | optional | Tenant requests per fixed window (default 60) |
+| `RATE_LIMIT_WINDOW_MS` | optional | Fixed rate-limit window in ms (default 60000) |
+| `SEARCH_CACHE_BACKEND` | optional | `redis` by default for authenticated mode; `memory` by default for development |
+| `SEARCH_CACHE_FAILURE_MODE` | optional | `bypass` or `fail`; defaults to `bypass` because caching is optional |
+| `METRICS_TOKEN` | optional | Enables `/metrics`; access requires its bearer token |
 
 ---
 
@@ -327,6 +368,8 @@ Goal: Unified proxy (chat + search) with human/agent identity.
 
 Key files:
 - packages/core-api/src/index.ts  -> Hono API, routing, SSRF, search, caching
+- packages/core-api/src/auth.ts   -> scoped tenant-key verification and hashing
+- packages/core-api/migrations/  -> PostgreSQL tenant/API-key schema
 - packages/sdk-ts/src/index.ts   -> TS client
 - packages/sdk-python/omnibridge/__init__.py -> Python client
 - packages/dashboard/package.json -> OAuth stub
@@ -337,6 +380,12 @@ Behavior:
 - /v1/chat/completions: agent_mode → response_format json_object (OpenAI), identity returned
 - /v1/search: Serper if SERPER_API_KEY else DDG HTML; public-only scrape_urls; 10m SHA-256 cache; HTML->MD
 - SSRF: DNS+IP private checks, redirects disabled, 1MB cap, text/* only
+- API auth: required by default; PostgreSQL-backed, scoped, revocable tenant keys
+- Rate limits: atomic per-tenant Redis fixed window; defaults to 60 requests/minute
+- Usage: durable PostgreSQL operation/status/latency metadata, no prompt or key values
+- Search cache: shared Redis in authenticated mode; bounded in-memory for development
+- Migrations: ordered, tracked, advisory-lock protected; container startup applies them
+- Local-only auth bypass: set `AUTH_MODE=development` explicitly
 - Keys: OPENAI_API_KEYS round-robin or OPENAI_API_KEY
 - Model: gpt-4o-mini for OpenAI live path
 
@@ -353,10 +402,13 @@ When editing:
 ## 💫 Development Workflow
 
 ```bash
-# Core API (dev)
+# Core API (local development; explicitly bypasses tenant auth)
 cd packages/core-api
 npm install
-npm run dev  # http://localhost:3000
+AUTH_MODE=development npm run dev  # http://localhost:3000
+
+# Production-style local stack
+docker compose up --build
 
 # Build TS SDK
 cd packages/sdk-ts && npx tsc
