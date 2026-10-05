@@ -112,10 +112,15 @@ jobs:
             -H "Authorization: Bearer $METRICS_TOKEN" \
             http://127.0.0.1:33000/metrics | grep -q omnibridge_http_requests_total
           docker compose -p omnibridge-ci up --scale api=2 -d
+          replica_key_output="$(docker compose -p omnibridge-ci exec -T api \
+            node packages/core-api/dist/api-keys.js create \
+            --tenant ci-replicas --name replica-smoke --scopes chat:complete)"
+          replica_api_key="$(printf '%s\n' "$replica_key_output" | grep '^omni_live_' | tail -n 1)"
+          test -n "$replica_api_key"
           first_status="$(docker compose -p omnibridge-ci exec -T --index 1 \
-            -e API_KEY="$api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
+            -e API_KEY="$replica_api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
           second_status="$(docker compose -p omnibridge-ci exec -T --index 2 \
-            -e API_KEY="$api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
+            -e API_KEY="$replica_api_key" api node -e "fetch('http://127.0.0.1:3000/v1/chat/completions', {method:'POST', headers:{authorization:'Bearer '+process.env.API_KEY,'content-type':'application/json'}, body:JSON.stringify({messages:[{role:'user',content:'hello'}]})}).then(r => console.log(r.status)).catch(e => { console.error(e); process.exitCode=1 })")"
           test "$first_status" = 200
           test "$second_status" = 429
           docker compose -p omnibridge-ci exec -T postgres \
