@@ -30,7 +30,10 @@ of unrelated provider integrations.
 - **Monthly budgets delivered:** Per-tenant successful-request budgets are
   enforced in PostgreSQL across replicas, with concurrent request reservations
   and UTC calendar-month accounting.
-- **Still open:** Distributed tracing.
+- **Distributed tracing delivered:** Optional OTLP/HTTP export, W3C trace
+  context propagation for inbound and outbound requests, graceful exporter
+  shutdown, and bounded spans that exclude bodies, URLs, headers, and error
+  messages.
 
 ## Why this is the highest-leverage contribution
 

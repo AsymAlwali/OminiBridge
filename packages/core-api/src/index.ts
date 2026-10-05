@@ -18,6 +18,7 @@ import {
 } from './search-cache.js'
 import { recordRequestMetric, renderPrometheusMetrics } from './metrics.js'
 import { recordRequestUsage, reserveMonthlyRequest } from './usage.js'
+import { isTracingEnabled, shutdownTracing, tracedFetch, withServerSpan } from './tracing.js'
 
 const app = new Hono<{ Variables: { tenantId: string } }>()
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
@@ -27,6 +28,24 @@ const MAX_PAGE_BYTES = 1_000_000
 let nextOpenAiKeyIndex = 0
 
 type SearchResult = { title: string; url: string; snippet: string }
+
+if (isTracingEnabled()) {
+  app.use('*', async (c, next) => {
+    await withServerSpan(c.req.raw, async (span) => {
+      try {
+        await next()
+      } catch (error) {
+        span.setAttribute('http.response.status_code', 500)
+        throw error
+      }
+      span.setAttribute('http.response.status_code', c.res.status)
+      const traceId = span.spanContext().traceId
+      if (traceId !== '00000000000000000000000000000000') {
+        c.header('X-Trace-ID', traceId)
+      }
+    })
+  })
+}
 
 function getOpenAiKeys() {
   const configuredKeys = process.env.OPENAI_API_KEYS
@@ -179,7 +198,7 @@ async function scrapePage(url: string) {
   if (!(await isPublicHttpUrl(url))) {
     return { url, error: 'URL must resolve to a public HTTP or HTTPS address.' }
   }
-  const response = await fetch(url, {
+  const response = await tracedFetch('search.scrape', url, {
     headers: { 'User-Agent': 'OminiBridge/1.0 (readability text extraction)' },
     redirect: 'error',
     signal: AbortSignal.timeout(8_000)
@@ -372,7 +391,7 @@ app.post('/v1/chat/completions', async (c) => {
         nextOpenAiKeyIndex = (keyIndex + 1) % openAiKeys.length
 
         try {
-          const upstreamRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          const upstreamRes = await tracedFetch('provider.openai', 'https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -496,7 +515,7 @@ app.post('/v1/search', async (c) => {
 
     if (searchKey) {
       try {
-        const searchRes = await fetch('https://google.serper.dev/search', {
+        const searchRes = await tracedFetch('search.serper', 'https://google.serper.dev/search', {
           method: 'POST',
           headers: {
             'X-API-KEY': searchKey,
@@ -535,7 +554,7 @@ app.post('/v1/search', async (c) => {
       try {
         const fallbackUrl = new URL('https://html.duckduckgo.com/html/')
         fallbackUrl.searchParams.set('q', normalizedQuery)
-        const fallbackRes = await fetch(fallbackUrl, {
+        const fallbackRes = await tracedFetch('search.duckduckgo', fallbackUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OminiBridge/1.0)' },
           signal: AbortSignal.timeout(8_000)
         })
@@ -591,7 +610,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
         console.error('HTTP server shutdown failed.')
         process.exitCode = 1
       }
-      Promise.all([closeRedisClient(), closeDatabasePool()])
+      Promise.all([closeRedisClient(), closeDatabasePool(), shutdownTracing()])
         .catch(() => {
           console.error('Infrastructure client shutdown failed.')
           process.exitCode = 1

@@ -14,13 +14,18 @@ acceptance criteria.
 
 ### Next
 
-- **Distributed tracing:** add trace context across incoming API requests,
-  provider/search calls, and service boundaries, while keeping credentials and
-  prompt content out of telemetry.
+- **Coalesce identical concurrent search misses:** a bounded in-process
+  single-flight for the existing cache key can make a burst of identical cold
+  searches share one upstream lookup without adding infrastructure. Verify the
+  reduction in upstream calls with a burst test and preserve cache outage
+  behavior.
 
 ### Later product improvements
 
 - Expand provider support and improve per-provider key configuration.
+- Distributed tracing is available via optional OTLP/HTTP export and W3C
+  context propagation; see the [README](../README.md#distributed-tracing) for
+  setup.
 - Add streaming passthrough, structured search parsing, and stronger request
   schema validation.
 - Develop a persistent dashboard backend only after its authorization model is
