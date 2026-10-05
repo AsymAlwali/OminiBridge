@@ -10,7 +10,7 @@ The TypeScript SDK is meant for JavaScript and Node-based application developers
 import { OmniBridge } from '@omnibridge/sdk';
 
 const omni = new OmniBridge({
-  apiKey: 'OMNI_KEY_SECRET',
+  apiKey: process.env.OMNIBRIDGE_API_KEY!,
   baseUrl: 'http://localhost:3000'
 });
 
@@ -26,9 +26,10 @@ const response = await omni.complete({
 The Python SDK is designed for agent-driven workflows and automation systems.
 
 ```python
+import os
 from omnibridge import OmniBridge
 
-omni = OmniBridge(api_key="OMNI_KEY_SECRET", base_url="http://localhost:3000")
+omni = OmniBridge(api_key=os.environ["OMNIBRIDGE_API_KEY"], base_url="http://localhost:3000")
 response = omni.complete(
     provider="openai",
     messages=[{"role": "user", "content": "Analyze system architecture."}],
@@ -41,6 +42,9 @@ response = omni.complete(
 - Consistent request shape across languages
 - Agent-focused response support
 - Easier integration for apps that need both generation and search
+- Non-success HTTP responses raise typed `OmniBridgeError` exceptions with the
+  HTTP status and parsed response body (`status` in TypeScript,
+  `status_code` in Python). Keep API keys in environment/configuration secrets.
 
 ## Related docs
 

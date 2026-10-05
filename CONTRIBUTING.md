@@ -63,6 +63,26 @@ The default address is `http://localhost:3000`. Check readiness in another termi
 curl --fail http://localhost:3000/health
 ```
 
+The API defaults to production authentication mode and requires a PostgreSQL
+database for protected `/v1/*` routes. For local development only, explicitly
+enable the authentication bypass:
+
+```bash
+AUTH_MODE=development npx tsx packages/core-api/src/index.ts
+```
+
+Never use `AUTH_MODE=development` for a reachable or production deployment.
+For an authenticated setup, apply the migration in
+`packages/core-api/migrations/001_tenant_api_keys.sql` and
+`002_shared_limits_and_usage.sql` and
+`003_monthly_request_budgets.sql`, set `DATABASE_URL` and `REDIS_URL`, and use
+the operator-only key and budget commands documented in the README.
+
+For a production-style local stack, use `docker compose up --build`; startup
+applies pending migrations and `/ready` reports PostgreSQL/Redis dependency
+health. Change the sample PostgreSQL password before using this stack outside
+a disposable local environment.
+
 ### 5. Run validation
 
 In a second terminal, run the TypeScript and Python integration matrices:
@@ -72,7 +92,19 @@ npx tsx test-pipeline.ts
 python test_pipeline.py
 ```
 
-The search checks can make an external request to DuckDuckGo when no Serper key is configured. A green local test is useful evidence, but it does not replace deterministic mocked tests for provider errors, cache expiry, security checks, or parsing edge cases.
+Run deterministic auth, SDK, and integration tests:
+
+```bash
+docker compose up -d postgres redis
+DATABASE_URL=postgresql://omnibridge:local-only-change-me@localhost:5432/omnibridge \
+REDIS_URL=redis://localhost:6379 npm test --workspace @omnibridge/core-api
+npm test --workspace @omnibridge/sdk
+python -m unittest discover -s packages/sdk-python/tests
+```
+
+The TypeScript build and CI verify the production Docker image as well as the
+database migrations and service integration. The live search smoke checks may
+call DuckDuckGo when no Serper key is configured.
 
 Build all TypeScript workspaces with:
 

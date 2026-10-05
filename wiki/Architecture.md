@@ -50,6 +50,20 @@ A lightweight dashboard stub for future admin or control-plane features.
 - Minimal dependency footprint
 - Safe by default for scraping and external fetches
 - Build for context-aware AI use cases
+- PostgreSQL-backed tenant API keys are required for protected API routes by
+  default. Only explicit `AUTH_MODE=development` bypasses authentication.
+- Keys are stored as hashes, checked for operation scopes, and revocable by
+  trusted operators; the unfinished dashboard is not part of this trust path.
+- Authenticated production requests are subject to Redis-backed atomic tenant
+  rate limits and recorded in PostgreSQL without prompt or credential content.
+- Redis and PostgreSQL are required for authenticated requests and fail closed
+  when their respective control or audit data cannot be checked/written.
+- Search results use a shared Redis cache in authenticated mode, with an
+  explicit bypass-or-fail policy when cache operations fail. Local development
+  uses a bounded in-memory cache.
+- Ordered, tracked PostgreSQL migrations are applied by the container entry
+  command; `/ready` checks required infrastructure and `/health` remains the
+  liveness probe.
 
 ## Related docs
 

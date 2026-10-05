@@ -1,17 +1,29 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { authenticateApiKey } from './auth.js'
+import { apiKeyStore } from './api-keys.js'
+import { closeDatabasePool, getDatabasePool } from './database.js'
+import { readPositiveInteger, TenantRateLimiter } from './rate-limiter.js'
+import { closeRedisClient, getRedisClient, redisCounter } from './redis.js'
+import {
+  getCacheFailureMode,
+  getSearchCache,
+  type CacheFailureMode,
+  type SearchCache
+} from './search-cache.js'
+import { recordRequestMetric, renderPrometheusMetrics } from './metrics.js'
+import { recordRequestUsage, reserveMonthlyRequest } from './usage.js'
 
-const app = new Hono()
+const app = new Hono<{ Variables: { tenantId: string } }>()
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
 const MAX_SEARCH_RESULTS = 20
 const MAX_SCRAPE_URLS = 5
 const MAX_PAGE_BYTES = 1_000_000
-const searchCache = new Map<string, { expiresAt: number; response: Record<string, unknown> }>()
 let nextOpenAiKeyIndex = 0
 
 type SearchResult = { title: string; url: string; snippet: string }
@@ -183,6 +195,151 @@ async function scrapePage(url: string) {
 
 app.get('/health', (c) => c.json({ status: 'healthy', timestamp: new Date().toISOString() }))
 
+app.get('/metrics', (c) => {
+  const expectedToken = process.env.METRICS_TOKEN
+  if (!expectedToken) return c.json({ success: false, error: 'Not found.' }, 404)
+  const suppliedToken = c.req.header('Authorization')?.match(/^Bearer (.+)$/)?.[1]
+  const expectedHash = createHash('sha256').update(expectedToken).digest()
+  const suppliedHash = createHash('sha256').update(suppliedToken ?? '').digest()
+  if (!suppliedToken || !timingSafeEqual(expectedHash, suppliedHash)) {
+    c.header('WWW-Authenticate', 'Bearer')
+    return c.json({ success: false, error: 'A valid metrics bearer token is required.' }, 401)
+  }
+  c.header('Cache-Control', 'no-store')
+  return c.text(renderPrometheusMetrics(), 200, {
+    'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'
+  })
+})
+
+app.get('/ready', async (c) => {
+  const authMode = process.env.AUTH_MODE ?? 'required'
+  if (authMode === 'development') {
+    return c.json({ status: 'ready', timestamp: new Date().toISOString() })
+  }
+  if (authMode !== 'required') return c.json({ status: 'not_ready' }, 503)
+  try {
+    await getDatabasePool().query('SELECT 1')
+    await (await getRedisClient()).ping()
+    return c.json({ status: 'ready', timestamp: new Date().toISOString() })
+  } catch {
+    return c.json({ status: 'not_ready' }, 503)
+  }
+})
+
+app.use('/v1/*', async (c, next) => {
+  const authMode = process.env.AUTH_MODE ?? 'required'
+  if (authMode === 'development') return next()
+  if (authMode !== 'required') {
+    return c.json({ success: false, error: 'API authentication is not configured correctly.' }, 503)
+  }
+
+  const requiredScope = c.req.path === '/v1/chat/completions' ? 'chat:complete' :
+    c.req.path === '/v1/search' ? 'search:read' : undefined
+  if (!requiredScope) return c.json({ success: false, error: 'Not found.' }, 404)
+
+  let result
+  try {
+    result = await authenticateApiKey(c.req.header('Authorization'), requiredScope, apiKeyStore)
+  } catch {
+    return c.json({ success: false, error: 'API authentication service is unavailable.' }, 503)
+  }
+  if (!result.ok) {
+    if (result.status === 401) c.header('WWW-Authenticate', 'Bearer')
+    return c.json({ success: false, error: result.error }, result.status)
+  }
+  c.set('tenantId', result.apiKey.tenantId)
+
+  const operation = requiredScope
+  const requestId = randomUUID()
+  const startedAt = Date.now()
+  c.header('X-Request-ID', requestId)
+  const replaceResponse = (body: Record<string, unknown>, status: 503) => {
+    const response = c.json(body, status)
+    c.res = response
+    return c.res
+  }
+  const persistUsage = async (statusCode: number) => {
+    try {
+      await recordRequestUsage({
+        requestId,
+        tenantId: result.apiKey.tenantId,
+        operation: requiredScope,
+        statusCode,
+        durationMs: Math.max(0, Date.now() - startedAt)
+      })
+      recordRequestMetric(operation, statusCode, Date.now() - startedAt)
+      return true
+    } catch {
+      recordRequestMetric(operation, 503, Date.now() - startedAt)
+      console.error('PostgreSQL usage recording failed for an authenticated API request.')
+      return false
+    }
+  }
+
+  let decision
+  try {
+    const limit = readPositiveInteger(process.env.RATE_LIMIT_MAX_REQUESTS, 60, 'RATE_LIMIT_MAX_REQUESTS')
+    const windowMs = readPositiveInteger(process.env.RATE_LIMIT_WINDOW_MS, 60_000, 'RATE_LIMIT_WINDOW_MS')
+    decision = await new TenantRateLimiter(redisCounter, limit, windowMs).consume(result.apiKey.tenantId)
+  } catch {
+    console.error('Shared rate limiting is unavailable; rejecting the authenticated API request.')
+    if (!(await persistUsage(503))) {
+      return c.json({ success: false, error: 'Usage storage is unavailable.' }, 503)
+    }
+    return c.json({ success: false, error: 'Shared rate limiting is unavailable.' }, 503)
+  }
+
+  c.header('RateLimit-Limit', String(decision.limit))
+  c.header('RateLimit-Remaining', String(decision.remaining))
+  if (!decision.allowed) {
+    c.header('Retry-After', String(decision.retryAfterSeconds))
+    if (!(await persistUsage(429))) {
+      return c.json({ success: false, error: 'Usage storage is unavailable.' }, 503)
+    }
+    return c.json({ success: false, error: 'Tenant request limit exceeded.' }, 429)
+  }
+
+  let monthlyBudget
+  try {
+    monthlyBudget = await reserveMonthlyRequest(requestId, result.apiKey.tenantId)
+  } catch {
+    console.error('Monthly request budget is unavailable; rejecting the authenticated API request.')
+    if (!(await persistUsage(503))) {
+      return c.json({ success: false, error: 'Usage storage is unavailable.' }, 503)
+    }
+    return c.json({ success: false, error: 'Monthly request budget is unavailable.' }, 503)
+  }
+  if (monthlyBudget.limit !== null) {
+    c.header('Monthly-Request-Limit', String(monthlyBudget.limit))
+    c.header('Monthly-Request-Remaining', String(Math.max(0, monthlyBudget.limit - monthlyBudget.used - 1)))
+  }
+  if (!monthlyBudget.allowed) {
+    if (!(await persistUsage(429))) {
+      return c.json({ success: false, error: 'Usage storage is unavailable.' }, 503)
+    }
+    return c.json({ success: false, error: 'Monthly successful request budget exceeded.' }, 429)
+  }
+
+  try {
+    await next()
+  } catch (error) {
+    if (!(await persistUsage(500))) {
+      return replaceResponse({
+        success: false,
+        error: 'Usage storage is unavailable; request outcome may be uncertain.'
+      }, 503)
+    }
+    throw error
+  }
+
+  if (!(await persistUsage(c.res.status))) {
+    return replaceResponse({
+      success: false,
+      error: 'Usage storage is unavailable; request outcome may be uncertain.'
+    }, 503)
+  }
+})
+
 // 🤖 Real Upstream AI Provider Forwarder
 app.post('/v1/chat/completions', async (c) => {
   try {
@@ -207,6 +364,7 @@ app.post('/v1/chat/completions', async (c) => {
       let lastError: unknown
       let lastData: unknown
       const startIndex = nextOpenAiKeyIndex
+      const requestSignal = AbortSignal.timeout(60_000)
 
       for (let attempt = 0; attempt < openAiKeys.length; attempt++) {
         const keyIndex = (startIndex + attempt) % openAiKeys.length
@@ -220,6 +378,7 @@ app.post('/v1/chat/completions', async (c) => {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${openAiKey}`
             },
+            signal: requestSignal,
             body: JSON.stringify({
               model: 'gpt-4o-mini',
               messages,
@@ -291,12 +450,26 @@ app.post('/v1/search', async (c) => {
     const cacheKey = createHash('sha256')
       .update(JSON.stringify([normalizedQuery, max_results, engine, scrape_urls]))
       .digest('hex')
-    const now = Date.now()
-    for (const [key, entry] of searchCache) {
-      if (entry.expiresAt <= now) searchCache.delete(key)
+    let cache: SearchCache
+    let cacheFailureMode: CacheFailureMode
+    try {
+      cache = getSearchCache()
+      cacheFailureMode = getCacheFailureMode()
+    } catch (err) {
+      return c.json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Search cache configuration is invalid.'
+      }, 503)
     }
-    const cached = searchCache.get(cacheKey)
-    if (cached) return c.json(cached.response)
+    try {
+      const cached = await cache.get(`omnibridge:search-cache:${cacheKey}`)
+      if (cached) return c.json(cached)
+    } catch {
+      console.error('Search cache read failed.')
+      if (cacheFailureMode === 'fail') {
+        return c.json({ success: false, error: 'Search cache is unavailable.' }, 503)
+      }
+    }
 
     for (const url of scrape_urls as string[]) {
       if (!(await isPublicHttpUrl(url))) {
@@ -304,11 +477,14 @@ app.post('/v1/search', async (c) => {
       }
     }
 
-    const cacheResponse = (response: Record<string, unknown>) => {
-      searchCache.set(cacheKey, { response, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS })
-      if (searchCache.size > 500) {
-        const oldestKey = searchCache.keys().next().value
-        if (oldestKey) searchCache.delete(oldestKey)
+    const cacheResponse = async (response: Record<string, unknown>) => {
+      try {
+        await cache.set(`omnibridge:search-cache:${cacheKey}`, response, SEARCH_CACHE_TTL_MS)
+      } catch {
+        console.error('Search cache write failed.')
+        if (cacheFailureMode === 'fail') {
+          return c.json({ success: false, error: 'Search cache is unavailable.' }, 503)
+        }
       }
       return c.json(response)
     }
@@ -404,7 +580,26 @@ app.post('/v1/search', async (c) => {
 })
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  serve({ fetch: app.fetch, port: 3000 })
+  const port = readPositiveInteger(process.env.PORT, 3000, 'PORT')
+  const server = serve({ fetch: app.fetch, port })
+  let shuttingDown = false
+  const shutdown = () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    server.close((error) => {
+      if (error) {
+        console.error('HTTP server shutdown failed.')
+        process.exitCode = 1
+      }
+      Promise.all([closeRedisClient(), closeDatabasePool()])
+        .catch(() => {
+          console.error('Infrastructure client shutdown failed.')
+          process.exitCode = 1
+        })
+    })
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
 }
 
 export default app
