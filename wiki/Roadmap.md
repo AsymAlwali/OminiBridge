@@ -12,24 +12,24 @@ deployment. See the
 [proposal](../PROPOSALS/production-gateway-foundation.md) for scope and
 acceptance criteria.
 
+### Runtime optimization delivered
+
+- **Coalesce identical concurrent search misses:** implemented as a bounded
+  in-process single-flight using the existing cache key. Concurrent identical
+  cold searches share one cache read, upstream lookup, scrape, and cache write;
+  settled or failed operations are removed, and cache outage policy is
+  preserved. An integration burst confirms eight simultaneous identical
+  requests cause one upstream lookup.
+
 ### Next
 
-- **Coalesce identical concurrent search misses:** a bounded in-process
-  single-flight for the existing cache key can make a burst of identical cold
-  searches share one upstream lookup without adding infrastructure. Verify the
-  reduction in upstream calls with a burst test and preserve cache outage
-  behavior.
-
-### Later product improvements
-
 - Expand provider support and improve per-provider key configuration.
-- Distributed tracing is available via optional OTLP/HTTP export and W3C
-  context propagation; see the [README](../README.md#distributed-tracing) for
-  setup.
 - Add streaming passthrough, structured search parsing, and stronger request
   schema validation.
 - Develop a persistent dashboard backend only after its authorization model is
   reviewed.
+- Configure optional distributed tracing via OTLP/HTTP and W3C context
+  propagation; see the [README](../README.md#distributed-tracing).
 
 The repo also includes the core abstraction, TypeScript and Python SDKs, search
 support, and a CI test pipeline.

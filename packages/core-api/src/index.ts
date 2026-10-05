@@ -19,6 +19,7 @@ import {
 import { recordRequestMetric, renderPrometheusMetrics } from './metrics.js'
 import { recordRequestUsage, reserveMonthlyRequest } from './usage.js'
 import { isTracingEnabled, shutdownTracing, tracedFetch, withServerSpan } from './tracing.js'
+import { coalesceSearchMiss } from './search-single-flight.js'
 
 const app = new Hono<{ Variables: { tenantId: string } }>()
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
@@ -480,119 +481,137 @@ app.post('/v1/search', async (c) => {
         error: err instanceof Error ? err.message : 'Search cache configuration is invalid.'
       }, 503)
     }
-    try {
-      const cached = await cache.get(`omnibridge:search-cache:${cacheKey}`)
-      if (cached) return c.json(cached)
-    } catch {
-      console.error('Search cache read failed.')
-      if (cacheFailureMode === 'fail') {
-        return c.json({ success: false, error: 'Search cache is unavailable.' }, 503)
-      }
-    }
-
-    for (const url of scrape_urls as string[]) {
-      if (!(await isPublicHttpUrl(url))) {
-        return c.json({ success: false, error: 'Every scrape URL must resolve to a public HTTP or HTTPS address.' }, 400)
-      }
-    }
-
-    const cacheResponse = async (response: Record<string, unknown>) => {
+    const outcome = await coalesceSearchMiss(cacheKey, async () => {
       try {
-        await cache.set(`omnibridge:search-cache:${cacheKey}`, response, SEARCH_CACHE_TTL_MS)
+        const cached = await cache.get(`omnibridge:search-cache:${cacheKey}`)
+        if (cached) return { body: cached, status: 200 as const }
       } catch {
-        console.error('Search cache write failed.')
+        console.error('Search cache read failed.')
         if (cacheFailureMode === 'fail') {
-          return c.json({ success: false, error: 'Search cache is unavailable.' }, 503)
-        }
-      }
-      return c.json(response)
-    }
-    const searchKey = process.env.SERPER_API_KEY
-    let results: SearchResult[] | undefined
-    let searchData: unknown
-    let selectedEngine = ''
-    let primaryError: string | undefined
-
-    if (searchKey) {
-      try {
-        const searchRes = await tracedFetch('search.serper', 'https://google.serper.dev/search', {
-          method: 'POST',
-          headers: {
-            'X-API-KEY': searchKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ q: normalizedQuery, num: max_results }),
-          signal: AbortSignal.timeout(8_000)
-        })
-        searchData = await searchRes.json()
-        if (!searchRes.ok) {
-          primaryError = `Serper request failed with status ${searchRes.status}.`
-        } else {
-          const data = searchData as { organic?: unknown }
-          if (Array.isArray(data?.organic)) {
-            results = (data.organic as unknown[]).slice(0, max_results).map((item) => {
-              const result = item && typeof item === 'object' ? item as Record<string, unknown> : {}
-              return {
-                title: typeof result.title === 'string' ? result.title : '',
-                url: typeof result.link === 'string' ? result.link : '',
-                snippet: typeof result.snippet === 'string' ? result.snippet : ''
-              }
-            })
-            selectedEngine = 'serper'
-          } else {
-            primaryError = 'Serper returned an invalid response.'
+          return {
+            body: { success: false, error: 'Search cache is unavailable.' },
+            status: 503 as const
           }
         }
-      } catch (err) {
-        primaryError = err instanceof Error ? err.message : String(err)
       }
-    } else {
-      primaryError = 'SERPER_API_KEY is not configured.'
-    }
 
-    if (!results) {
-      try {
-        const fallbackUrl = new URL('https://html.duckduckgo.com/html/')
-        fallbackUrl.searchParams.set('q', normalizedQuery)
-        const fallbackRes = await tracedFetch('search.duckduckgo', fallbackUrl, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OminiBridge/1.0)' },
-          signal: AbortSignal.timeout(8_000)
-        })
-        if (!fallbackRes.ok) {
-          return c.json({
-            success: false,
-            error: 'All search providers failed.',
-            details: `DuckDuckGo fallback failed with status ${fallbackRes.status}.`,
-            primary_error: primaryError
-          }, 502)
+      for (const url of scrape_urls as string[]) {
+        if (!(await isPublicHttpUrl(url))) {
+          return {
+            body: { success: false, error: 'Every scrape URL must resolve to a public HTTP or HTTPS address.' },
+            status: 400 as const
+          }
         }
-        results = parseDuckDuckGoResults((await readTextWithLimit(fallbackRes, MAX_PAGE_BYTES))).slice(0, max_results)
-        selectedEngine = 'duckduckgo-html'
-      } catch (err) {
-        return c.json({
-          success: false,
-          error: 'All search providers failed.',
-          details: err instanceof Error ? err.message : String(err),
-          primary_error: primaryError
-        }, 502)
       }
-    }
 
-    const scrapedContent = await Promise.all((scrape_urls as string[]).map(async (url) => {
-      try {
-        return await scrapePage(url)
-      } catch (err) {
-        return { url, error: err instanceof Error ? err.message : String(err) }
+      const cacheResponse = async (response: Record<string, unknown>) => {
+        try {
+          await cache.set(`omnibridge:search-cache:${cacheKey}`, response, SEARCH_CACHE_TTL_MS)
+        } catch {
+          console.error('Search cache write failed.')
+          if (cacheFailureMode === 'fail') {
+            return {
+              body: { success: false, error: 'Search cache is unavailable.' },
+              status: 503 as const
+            }
+          }
+        }
+        return { body: response, status: 200 as const }
       }
-    }))
-    return cacheResponse({
-      success: true,
-      engine: selectedEngine,
-      results,
-      ...(searchData === undefined ? {} : { data: searchData }),
-      ...(primaryError && selectedEngine !== 'serper' ? { fallback_reason: primaryError } : {}),
-      ...(scrapedContent.length ? { scraped_content: scrapedContent } : {})
+      const searchKey = process.env.SERPER_API_KEY
+      let results: SearchResult[] | undefined
+      let searchData: unknown
+      let selectedEngine = ''
+      let primaryError: string | undefined
+
+      if (searchKey) {
+        try {
+          const searchRes = await tracedFetch('search.serper', 'https://google.serper.dev/search', {
+            method: 'POST',
+            headers: {
+              'X-API-KEY': searchKey,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ q: normalizedQuery, num: max_results }),
+            signal: AbortSignal.timeout(8_000)
+          })
+          searchData = await searchRes.json()
+          if (!searchRes.ok) {
+            primaryError = `Serper request failed with status ${searchRes.status}.`
+          } else {
+            const data = searchData as { organic?: unknown }
+            if (Array.isArray(data?.organic)) {
+              results = (data.organic as unknown[]).slice(0, max_results).map((item) => {
+                const result = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+                return {
+                  title: typeof result.title === 'string' ? result.title : '',
+                  url: typeof result.link === 'string' ? result.link : '',
+                  snippet: typeof result.snippet === 'string' ? result.snippet : ''
+                }
+              })
+              selectedEngine = 'serper'
+            } else {
+              primaryError = 'Serper returned an invalid response.'
+            }
+          }
+        } catch (err) {
+          primaryError = err instanceof Error ? err.message : String(err)
+        }
+      } else {
+        primaryError = 'SERPER_API_KEY is not configured.'
+      }
+
+      if (!results) {
+        try {
+          const fallbackUrl = new URL('https://html.duckduckgo.com/html/')
+          fallbackUrl.searchParams.set('q', normalizedQuery)
+          const fallbackRes = await tracedFetch('search.duckduckgo', fallbackUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OminiBridge/1.0)' },
+            signal: AbortSignal.timeout(8_000)
+          })
+          if (!fallbackRes.ok) {
+            return {
+              body: {
+                success: false,
+                error: 'All search providers failed.',
+                details: `DuckDuckGo fallback failed with status ${fallbackRes.status}.`,
+                primary_error: primaryError
+              },
+              status: 502 as const
+            }
+          }
+          results = parseDuckDuckGoResults((await readTextWithLimit(fallbackRes, MAX_PAGE_BYTES))).slice(0, max_results)
+          selectedEngine = 'duckduckgo-html'
+        } catch (err) {
+          return {
+            body: {
+              success: false,
+              error: 'All search providers failed.',
+              details: err instanceof Error ? err.message : String(err),
+              primary_error: primaryError
+            },
+            status: 502 as const
+          }
+        }
+      }
+
+      const scrapedContent = await Promise.all((scrape_urls as string[]).map(async (url) => {
+        try {
+          return await scrapePage(url)
+        } catch (err) {
+          return { url, error: err instanceof Error ? err.message : String(err) }
+        }
+      }))
+      return cacheResponse({
+        success: true,
+        engine: selectedEngine,
+        results,
+        ...(searchData === undefined ? {} : { data: searchData }),
+        ...(primaryError && selectedEngine !== 'serper' ? { fallback_reason: primaryError } : {}),
+        ...(scrapedContent.length ? { scraped_content: scrapedContent } : {})
+      })
     })
+    return c.json(outcome.body, outcome.status)
   } catch (err) {
     return c.json({ success: false, error: err instanceof Error ? err.message : String(err) }, 500)
   }

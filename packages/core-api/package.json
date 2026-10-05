@@ -6,7 +6,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "migrate": "tsx src/migrate.ts",
-    "test": "tsx --test --test-concurrency=1 src/auth.test.ts src/auth.postgres.test.ts src/rate-limiter.test.ts src/rate-limiter.redis.test.ts src/usage.integration.test.ts src/availability.integration.test.ts src/search-cache.test.ts src/search-cache.integration.test.ts src/monthly-budget.integration.test.ts src/migrate.test.ts src/metrics.test.ts src/tracing.test.ts",
+    "test": "tsx --test --test-concurrency=1 src/auth.test.ts src/auth.postgres.test.ts src/rate-limiter.test.ts src/rate-limiter.redis.test.ts src/usage.integration.test.ts src/availability.integration.test.ts src/search-cache.test.ts src/search-cache.integration.test.ts src/search-single-flight.test.ts src/monthly-budget.integration.test.ts src/migrate.test.ts src/metrics.test.ts src/tracing.test.ts",
     "keys": "tsx src/api-keys.ts"
   },
   "dependencies": {
