@@ -21,6 +21,7 @@ test('fails protected requests closed when usage writes or Redis are unavailable
   try {
     await pool.query(await readFile(new URL('../migrations/001_tenant_api_keys.sql', import.meta.url), 'utf8'))
     await pool.query(await readFile(new URL('../migrations/002_shared_limits_and_usage.sql', import.meta.url), 'utf8'))
+    await pool.query(await readFile(new URL('../migrations/003_monthly_request_budgets.sql', import.meta.url), 'utf8'))
     await pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [tenantId, tenantName])
     await pool.query(
       `INSERT INTO api_keys (tenant_id, name, key_prefix, key_hash, scopes)
