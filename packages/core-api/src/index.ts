@@ -79,7 +79,7 @@ function stripHtmlToMarkdown(html: string, baseUrl?: string) {
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<(script|style|noscript|svg|iframe|nav|footer|header|form|button|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
     .replace(/<(h[1-6])\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_, tag: string, text: string) => `\n${'#'.repeat(Number(tag[1]))} ${text}\n`)
-    .replace(/<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, _quote: string, href: string, text: string) => {
+    .replace(/<a\b[^>]*href=("|')(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi, (_, _quote: string, href: string, text: string) => {
       const label = text.replace(/<[^>]*>/g, '').trim()
       try {
         const url = baseUrl ? new URL(decodeHtmlEntities(href), baseUrl).toString() : decodeHtmlEntities(href)
@@ -101,7 +101,7 @@ function stripHtmlToMarkdown(html: string, baseUrl?: string) {
   return markdown
 }
 
-function isPrivateAddress(address: string) {
+export function isPrivateAddress(address: string) {
   if (address.startsWith('::ffff:')) return isPrivateAddress(address.slice(7))
   if (isIP(address) === 4) {
     const octets = address.split('.').map(Number)
@@ -119,7 +119,7 @@ function isPrivateAddress(address: string) {
     /^fe[89ab]/i.test(normalized)
 }
 
-async function isPublicHttpUrl(value: string) {
+export async function isPublicHttpUrl(value: string) {
   try {
     const url = new URL(value)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false
@@ -168,7 +168,7 @@ async function readTextWithLimit(response: Response, maxBytes: number) {
   }
 }
 
-function parseDuckDuckGoResults(html: string): SearchResult[] {
+export function parseDuckDuckGoResults(html: string): SearchResult[] {
   const results: SearchResult[] = []
   const resultPattern = /<a\b([^>]*class=["'][^"']*\bresult__a\b[^"']*["'][^>]*)>([\s\S]*?)<\/a\s*>/gi
   for (const match of html.matchAll(resultPattern)) {
@@ -195,7 +195,7 @@ function parseDuckDuckGoResults(html: string): SearchResult[] {
   return results
 }
 
-async function scrapePage(url: string) {
+export async function scrapePage(url: string) {
   if (!(await isPublicHttpUrl(url))) {
     return { url, error: 'URL must resolve to a public HTTP or HTTPS address.' }
   }
@@ -360,7 +360,6 @@ app.use('/v1/*', async (c, next) => {
   }
 })
 
-// 🤖 Real Upstream AI Provider Forwarder
 app.post('/v1/chat/completions', async (c) => {
   try {
     const body = await c.req.json()
@@ -396,7 +395,7 @@ app.post('/v1/chat/completions', async (c) => {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${openAiKey}`
+              Authorization: `Bearer ${openAiKey}`
             },
             signal: requestSignal,
             body: JSON.stringify({
@@ -435,7 +434,6 @@ app.post('/v1/chat/completions', async (c) => {
       }, 502)
     }
 
-    // Fallback stub for other providers until custom keys are provided
     return c.json({
       success: true,
       provider,
@@ -447,7 +445,6 @@ app.post('/v1/chat/completions', async (c) => {
   }
 })
 
-// 🔍 Real Serper / Google Live Search Integration
 app.post('/v1/search', async (c) => {
   try {
     const body = await c.req.json()
